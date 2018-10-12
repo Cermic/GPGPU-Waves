@@ -93,6 +93,7 @@ float translate_z = -3.0;
 
 // Keyboars Inputs
 float x_offset = 0, y_offset = 0, z_offset = 0;
+bool jitter_on = false;
 StopWatchInterface *timer = NULL;
 
 // Auto-Verification Code
@@ -133,15 +134,9 @@ void runAutoTest(int devID, char **argv, char *ref_file);
 void checkResultCuda(int argc, char **argv, const GLuint &vbo);
 
 const char *sSDKsample = "simpleGL (VBO)";
-__host__ __device__ void keyboardInput(unsigned char key, int i, int j)
-{
-	if (key == 'F')
-	{
-
-	}
-}
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
+//! Generates a movable circle of calm within the wave pattern
 //! @param data  data in global memory
 ///////////////////////////////////////////////////////////////////////////////
 __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, float x_offset, float y_offset, float z_offset)
@@ -173,9 +168,10 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
 
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
+//! Adds Jitter to the wave pattern
 //! @param data  data in global memory
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void second_simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time)
+__global__ void jitter_kernel(float4 *pos, unsigned int width, unsigned int height, float time)
 {
 	unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
 	unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
@@ -202,6 +198,8 @@ void launch_kernel(float4 *pos, unsigned int mesh_width,
     dim3 block(8, 8, 1);
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
     simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, x_offset, y_offset, z_offset);
+	if(jitter_on)
+		jitter_kernel << < grid, block >> > (pos, mesh_width, mesh_height, time);
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -578,6 +576,15 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
 			if (z_offset > -CIRCLE_LIMIT)
 			{
 				z_offset -= 0.01f;
+			}
+		case 'j':
+			if (jitter_on)
+			{
+				jitter_on = false;
+			}
+			else
+			{
+				jitter_on = true;
 			}
 			break;
     }
