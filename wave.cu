@@ -92,7 +92,11 @@ float rotate_x = 0.0, rotate_y = 0.0;
 float translate_z = -3.0;
 
 // Keyboars Inputs
-float x_offset = 0, y_offset = 0, z_offset = 0;
+struct Offsets {
+	float x_offset = 0, y_offset = 0, z_offset = 0;
+};
+
+Offsets offset;
 bool jitter_on = false;
 StopWatchInterface *timer = NULL;
 
@@ -139,7 +143,7 @@ const char *sSDKsample = "simpleGL (VBO)";
 //! Generates a movable circle of calm within the wave pattern
 //! @param data  data in global memory
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, float x_offset, float y_offset, float z_offset)
+__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Offsets offset)
 {
 	const float CIRCLE_RADIUS = 0.25;
     unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
@@ -148,8 +152,8 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
     // calculate uv coordinates
     float u = x / (float) width;
     float v = y / (float) height;
-    u = u*2.0f - 1.0f + x_offset; // Allows the circle to move left and right on the plane.
-    v = v*2.0f - 1.0f + z_offset; // Allows the circle to move up and down on the plane.
+    u = u*2.0f - 1.0f + offset.x_offset; // Allows the circle to move left and right on the plane.
+    v = v*2.0f - 1.0f + offset.z_offset; // Allows the circle to move up and down on the plane.
 
 	// calculate simple sine wave pattern
 	float freq = 3.0f;
@@ -159,7 +163,7 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
 	// write output vertex
 	if (sqrt(u*u + v*v) < CIRCLE_RADIUS) // Perimeter of circle
 	{
-		w = 0.0f + y_offset;
+		w = 0.0f + offset.y_offset;
 	}
 	pos[y*width + x] = make_float4(u, w, v, 1.0f);
 	// Change order or u, v and w to manipulate x, y or z being changed.
@@ -197,7 +201,7 @@ void launch_kernel(float4 *pos, unsigned int mesh_width,
     // execute the kernel
     dim3 block(8, 8, 1);
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
-    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, x_offset, y_offset, z_offset);
+    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, offset);
 	if(jitter_on)
 		jitter_kernel << < grid, block >> > (pos, mesh_width, mesh_height, time);
 }
@@ -555,28 +559,29 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
                 return;
             #endif
 		case 'a':
-			if (x_offset < CIRCLE_LIMIT)
+			if (offset.x_offset < CIRCLE_LIMIT)
 			{
-				x_offset += 0.01f;
+				offset.x_offset += 0.01f;
 			}
 			break;
 		case 'd':
-			if (x_offset > -CIRCLE_LIMIT)
+			if (offset.x_offset > -CIRCLE_LIMIT)
 			{
-				x_offset -= 0.01f;
+				offset.x_offset -= 0.01f;
 			}
 			break;
 		case 'w':
-			if (z_offset < CIRCLE_LIMIT)
+			if (offset.z_offset < CIRCLE_LIMIT)
 			{
-				z_offset += 0.01f;
+				offset.z_offset += 0.01f;
 			}
 			break;
 		case 's':
-			if (z_offset > -CIRCLE_LIMIT)
+			if (offset.z_offset > -CIRCLE_LIMIT)
 			{
-				z_offset -= 0.01f;
+				offset.z_offset -= 0.01f;
 			}
+			break;
 		case 'j':
 			if (jitter_on)
 			{
