@@ -215,6 +215,8 @@ __global__ void jitter_kernel(float4 *pos, unsigned int width/*, unsigned int he
 	unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
 	
 	// write output vertex
+	// Need to apply a random jitter value to each point on the wave. Y value is generating the wave so applying
+	// the values to the y component only should be enough, need to apply each value to each point individually. How do?
 	pos[y*width + x].y /*+= (float)rand_buffer[rand_buffer_start]*/;
 	//rand_buffer_start++;
 }
@@ -547,7 +549,6 @@ void display()
     glutSwapBuffers();
 
     g_fAnim += 0.05f;
-	//glutKeyboardFunc(keyboardInput);
     sdkStopTimer(&timer);
     computeFPS();
 }
