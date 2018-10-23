@@ -34,6 +34,7 @@
 #include <string.h>
 #include <math.h>
 #include <device_launch_parameters.h>
+#include <random>
 
 #ifdef _WIN32
 #  define WINDOWS_LEAN_AND_MEAN
@@ -65,6 +66,7 @@
 #include <helper_cuda.h>         // helper functions for CUDA error check
 
 #include <vector_types.h>
+#include <array>
 
 #define MAX_EPSILON_ERROR 10.0f
 #define THRESHOLD          0.30f
@@ -91,12 +93,28 @@ int mouse_buttons = 0;
 float rotate_x = 0.0, rotate_y = 0.0;
 float translate_z = -3.0;
 
-// Keyboars Inputs
+// Keyboard Inputs
 struct Offsets {
 	float x_offset = 0, y_offset = 0, z_offset = 0;
 };
 
+// Random number upper and lower limits
+struct WaveLimits {
+	float lower_limit = 1.0, upper_limit = 2.0;
+};
+
 Offsets offset;
+WaveLimits limits;
+
+// Creating random number generation.
+std::random_device rd;  //Will be used to obtain a seed for the random number engine
+std::mt19937 gen{ rd() };
+std::uniform_real_distribution<> rands (limits.lower_limit, limits.upper_limit);
+
+// Defining random number buffer size and type.
+const int RAND_BUFFER_SIZE = (mesh_width * mesh_height);
+std::array <double, RAND_BUFFER_SIZE> rand_buffer;
+
 bool jitter_on = false;
 StopWatchInterface *timer = NULL;
 
@@ -137,6 +155,20 @@ void runCuda(struct cudaGraphicsResource **vbo_resource);
 void runAutoTest(int devID, char **argv, char *ref_file);
 void checkResultCuda(int argc, char **argv, const GLuint &vbo);
 
+///////////////////////////////////////////////////////////////////////////////
+//! Generates a buffer of uniformly distributed values between 2 limits
+//! @param random_distribution - The random distribution definition carrying the limits
+//! @param mt - Seeded Mersenne twister engine to generate new values each generation call
+///////////////////////////////////////////////////////////////////////////////
+void RandomNoiseGeneration(std::uniform_real_distribution<> random_distribution, std::mt19937 mt)
+{
+	for (int i = 0; i < rand_buffer.size(); i++)
+	{
+		rand_buffer[i] = random_distribution(mt);
+		//std::cout << rand_buffer[i] << std::endl;
+	}
+}
+
 const char *sSDKsample = "simpleGL (VBO)";
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
@@ -173,33 +205,34 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
 //! Adds Jitter to the wave pattern
+//! @param rand_buffer
+//! @param rand_buffer_start
 //! @param data  data in global memory
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void jitter_kernel(float4 *pos, unsigned int width, unsigned int height, float time)
+__global__ void jitter_kernel(float4 *pos, unsigned int width/*, unsigned int height, float time, WaveLimits limit, std::array<double, RAND_BUFFER_SIZE>& rand_buffer, int rand_buffer_start*/)
 {
 	unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
 	unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
-
+	
 	// write output vertex
-	pos[y*width + x].x += 0.1f;
-	pos[y*width + x].y += 0.1f;
-	pos[y*width + x].z += 0.1f;
-
+	pos[y*width + x].y /*+= (float)rand_buffer[rand_buffer_start]*/;
+	//rand_buffer_start++;
 }
 
 
 void launch_kernel(float4 *pos, unsigned int mesh_width,
                    unsigned int mesh_height, float time)
 {
+	RandomNoiseGeneration(rands, gen);
     // execute the kernel
     dim3 block(8, 8, 1);
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
     simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, offset);
-	//cudaDeviceSynchronize();
 	if (jitter_on)
 	{
-		jitter_kernel << < grid, block >> > (pos, mesh_width, mesh_height, time);
+		jitter_kernel << < grid, block >> > (pos, mesh_width/*, mesh_height, time, limits,*/ /*rand_buffer*/);
 	}
+	
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -587,6 +620,12 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
 			{
 				jitter_on = true;
 			}
+			break;
+		case 'o':
+			limits.lower_limit += 0.01f;
+			break;
+		case 'l':
+			limits.lower_limit -= 0.01f;
 			break;
     }
 }
