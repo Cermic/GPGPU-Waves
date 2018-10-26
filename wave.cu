@@ -67,6 +67,8 @@
 
 #include <vector_types.h>
 #include <array>
+#include <chrono>
+#include <thread>
 
 #define MAX_EPSILON_ERROR 10.0f
 #define THRESHOLD          0.30f
@@ -79,12 +81,16 @@ const unsigned int window_height = 512;
 
 const unsigned int mesh_width    = 128;
 const unsigned int mesh_height   = 128;
+float r = 0, g = 0, b = 0;
+//float n1 = (rand() / (RAND_MAX + 1.0));
+//float n2 = (rand() / (RAND_MAX + 1.0));
+
 
 // vbo variables
 GLuint vbo;
 struct cudaGraphicsResource *cuda_vbo_resource;
 void *d_vbo_buffer = NULL;
-
+float * d_rand_buffer;
 float g_fAnim = 0.0;
 
 // mouse controls
@@ -94,26 +100,24 @@ float rotate_x = 0.0, rotate_y = 0.0;
 float translate_z = -3.0;
 
 // Keyboard Inputs
-struct Offsets {
-	float x_offset = 0, y_offset = 0, z_offset = 0;
+struct Origin {
+	float x = 0, y=0, z = 0;
 };
 
 // Random number upper and lower limits
 struct WaveLimits {
-	float lower_limit = 1.0, upper_limit = 2.0;
+	float lower_limit = -0.05, upper_limit = 0.05;
 };
 
-Offsets offset;
+Origin origin;
 WaveLimits limits;
-
-// Creating random number generation.
-std::random_device rd;  //Will be used to obtain a seed for the random number engine
-std::mt19937 gen{ rd() };
-std::uniform_real_distribution<> rands (limits.lower_limit, limits.upper_limit);
-
+static const float incrementer = 0.01f;
 // Defining random number buffer size and type.
-const int RAND_BUFFER_SIZE = (mesh_width * mesh_height);
-std::array <double, RAND_BUFFER_SIZE> rand_buffer;
+static const int RAND_BUFFER_SIZE = (mesh_width * mesh_height * 4);
+std::array <float, RAND_BUFFER_SIZE> rand_buffer;
+std::random_device rd;  //Will be used to obtain a seed for the random number engine
+std::mt19937  gen{ rd() };
+
 
 bool jitter_on = false;
 StopWatchInterface *timer = NULL;
@@ -146,6 +150,7 @@ void deleteVBO(GLuint *vbo, struct cudaGraphicsResource *vbo_res);
 // rendering callbacks
 void display();
 void keyboard(unsigned char key, int x, int y);
+void specialKeyboard(int key, int x, int y);
 void mouse(int button, int state, int x, int y);
 void motion(int x, int y);
 void timerEvent(int value);
@@ -157,15 +162,15 @@ void checkResultCuda(int argc, char **argv, const GLuint &vbo);
 
 ///////////////////////////////////////////////////////////////////////////////
 //! Generates a buffer of uniformly distributed values between 2 limits
-//! @param random_distribution - The random distribution definition carrying the limits
-//! @param mt - Seeded Mersenne twister engine to generate new values each generation call
 ///////////////////////////////////////////////////////////////////////////////
-void RandomNoiseGeneration(std::uniform_real_distribution<> random_distribution, std::mt19937 mt)
+
+void RandomNoiseGeneration()
 {
+	std::uniform_real_distribution<> rands(limits.lower_limit, limits.upper_limit);
 	for (int i = 0; i < rand_buffer.size(); i++)
 	{
-		rand_buffer[i] = random_distribution(mt);
-		//std::cout << rand_buffer[i] << std::endl;
+		rand_buffer[i] = rands(gen);
+		//rand_buffer[i] = ((rand() / (float)RAND_MAX) - 0.5f) * 0.05f;
 	}
 }
 
@@ -173,9 +178,13 @@ const char *sSDKsample = "simpleGL (VBO)";
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
 //! Generates a movable circle of calm within the wave pattern
-//! @param data  data in global memory
+//! @param pos - positions of the points in the mesh
+//! @param width - mesh width
+//! @param height - mesh height
+//! @param time - system time
+//! @param origin - origin point of the circle
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Offsets offset)
+__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Origin origin)
 {
 	const float CIRCLE_RADIUS = 0.25;
     unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
@@ -184,57 +193,84 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
     // calculate uv coordinates
     float u = x / (float) width;
     float v = y / (float) height;
-    u = u*2.0f - 1.0f + offset.x_offset; // Allows the circle to move left and right on the plane.
-    v = v*2.0f - 1.0f + offset.z_offset; // Allows the circle to move up and down on the plane.
+    u = u*2.0f - 1.0f; // Allows the circle to move left and right on the plane.
+    v = v*2.0f - 1.0f; // Allows the circle to move up and down on the plane.
 
 	// calculate simple sine wave pattern
 	float freq = 3.0f;
 	float w = sinf(u*freq + time) * cosf(v*freq + time) * 0.5f;
 	//DNA Swizzle u = sinf(u*freq + time) *cosf(v* freq + time);
 
+
+	float centreX = u - origin.x;
+	float centreY = v - origin.z;
 	// write output vertex
-	if (sqrt(u*u + v*v) < CIRCLE_RADIUS) // Perimeter of circle
+	if (sqrt(centreX*centreX + centreY*centreY) < CIRCLE_RADIUS) // Perimeter of circle
 	{
-		w = 0.0f + offset.y_offset;
+		w = 0.0f + origin.y;
 	}
 	pos[y*width + x] = make_float4(u, w, v, 1.0f);
 	// Change order or u, v and w to manipulate x, y or z being changed.
 }
 
-
 ///////////////////////////////////////////////////////////////////////////////
 //! Simple kernel to modify vertex positions in sine wave pattern
 //! Adds Jitter to the wave pattern
-//! @param rand_buffer
-//! @param rand_buffer_start
-//! @param data  data in global memory
+//! @param pos - positions of the points in the mesh
+//! @param width - mesh width
+//! @param rand_buffer - buffer of random floats to apply to the points on the mesh
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void jitter_kernel(float4 *pos, unsigned int width/*, unsigned int height, float time, WaveLimits limit, std::array<double, RAND_BUFFER_SIZE>& rand_buffer, int rand_buffer_start*/)
+__global__ void jitter_kernel(float4 *pos, unsigned int width, float *rand_buffer)
 {
 	unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
 	unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
-	
-	// write output vertex
-	// Need to apply a random jitter value to each point on the wave. Y value is generating the wave so applying
-	// the values to the y component only should be enough, need to apply each value to each point individually. How do?
-	pos[y*width + x].y /*+= (float)rand_buffer[rand_buffer_start]*/;
-	//rand_buffer_start++;
-}
 
+	// write output vertex
+	int index = y*width + x;
+	int b_index = index * 4;
+	pos[index].x += rand_buffer[b_index];
+	pos[index].y += rand_buffer[b_index+1];
+	pos[index].z += rand_buffer[b_index+2];
+}
 
 void launch_kernel(float4 *pos, unsigned int mesh_width,
                    unsigned int mesh_height, float time)
 {
-	RandomNoiseGeneration(rands, gen);
+	RandomNoiseGeneration();
     // execute the kernel
     dim3 block(8, 8, 1);
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
-    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, offset);
+    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, origin);
 	if (jitter_on)
 	{
-		jitter_kernel << < grid, block >> > (pos, mesh_width/*, mesh_height, time, limits,*/ /*rand_buffer*/);
+		jitter_kernel << < grid, block >> > (pos, mesh_width, d_rand_buffer);
 	}
-	
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+
+	/* Add "Creative" shit - change animation speed, wave pattern (DNA), 
+	 * RGB - change point colour based on y coord of point.
+	 */
+
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
+	////////////////////////////////////////////
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -315,7 +351,9 @@ bool initGL(int *argc, char **argv)
     glutInitWindowSize(window_width, window_height);
     glutCreateWindow("Cuda GL Interop (VBO)");
     glutDisplayFunc(display);
-    glutKeyboardFunc(keyboard);
+	
+    glutKeyboardFunc(keyboard); // Key inputs
+	glutSpecialFunc(specialKeyboard); // Special key inputs
     glutMotionFunc(motion);
     glutTimerFunc(REFRESH_DELAY, timerEvent,0);
 
@@ -383,6 +421,7 @@ bool runTest(int argc, char **argv, char *ref_file)
         // register callbacks
         glutDisplayFunc(display);
         glutKeyboardFunc(keyboard);
+		glutSpecialFunc(specialKeyboard);
         glutMouseFunc(mouse);
         glutMotionFunc(motion);
 #if defined (__APPLE__) || defined(MACOSX)
@@ -411,16 +450,15 @@ void runCuda(struct cudaGraphicsResource **vbo_resource)
 {
     // map OpenGL buffer object for writing from CUDA
     float4 *dptr;
+
+
     checkCudaErrors(cudaGraphicsMapResources(1, vbo_resource, 0));
     size_t num_bytes;
     checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void **)&dptr, &num_bytes,
                                                          *vbo_resource));
-    //printf("CUDA mapped VBO: May access %ld bytes\n", num_bytes);
 
-    // execute the kernel
-    //    dim3 block(8, 8, 1);
-    //    dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
-    //    kernel<<< grid, block>>>(dptr, mesh_width, mesh_height, g_fAnim);
+	cudaMalloc((void **)&d_rand_buffer, rand_buffer.size() * sizeof(float));
+	cudaMemcpy(d_rand_buffer, rand_buffer.data(), rand_buffer.size() * sizeof(float), cudaMemcpyHostToDevice);
 
     launch_kernel(dptr, mesh_width, mesh_height, g_fAnim);
 
@@ -539,7 +577,8 @@ void display()
     glVertexPointer(4, GL_FLOAT, 0, 0);
 
     glEnableClientState(GL_VERTEX_ARRAY);
-    glColor3f(0.0, 0.0, 1.0);
+	
+	glColor3f(n1, n2, 1.0f);
 	// Deafult point size is always 1 so we can use glPointSize here to increase their size
 	glPointSize(2.0f);
 	glEnable(GL_POINT_SMOOTH); // Anti aliases the points down into circles.
@@ -573,12 +612,60 @@ void cleanup()
 }
 
 
+void specialKeyboard(int key, int x, int y)
+{
+	switch (key)
+	{
+	case GLUT_KEY_UP:
+		if (limits.upper_limit < (incrementer * 50))
+		{
+			limits.lower_limit -= incrementer;
+			limits.upper_limit += incrementer;
+		}
+		break;
+	case GLUT_KEY_DOWN:
+		if (limits.lower_limit < -incrementer)
+		{
+			limits.lower_limit += incrementer;
+			limits.upper_limit -= incrementer;
+		}
+		else
+		{
+			limits.lower_limit = -incrementer;
+			limits.upper_limit = incrementer;
+		}
+		break;
+	case GLUT_KEY_RIGHT:
+		///*if (r >= 1.0)
+		//{
+		//	r -= n3;
+		//}*/
+		//r += n1;
+		///*if (g >= 1.0)
+		//{
+		//	g -= n1;
+		//}*/
+		//g += n2;
+		///*if (b >= 1.0)
+		//{
+		//	b -= n2;
+		//}*/
+		//b += n3;
+		break;
+	case GLUT_KEY_LEFT:
+		/*g -= n1;
+		b -= n2;
+		r -= n3;*/
+		break;
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 //! Keyboard events handler
 ////////////////////////////////////////////////////////////////////////////////
 void keyboard(unsigned char key, int /*x*/, int /*y*/)
 {
-	const float CIRCLE_LIMIT = 0.75;
+	const float CIRCLE_LIMIT = 0.9;
     switch (key)
     {
         case (27) :
@@ -589,44 +676,43 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
                 return;
             #endif
 		case 'a':
-			if (offset.x_offset < CIRCLE_LIMIT)
+			if (origin.x > -CIRCLE_LIMIT)
 			{
-				offset.x_offset += 0.01f;
+				origin.x -= incrementer;
 			}
 			break;
 		case 'd':
-			if (offset.x_offset > -CIRCLE_LIMIT)
+			if (origin.x < CIRCLE_LIMIT)
 			{
-				offset.x_offset -= 0.01f;
+				origin.x += incrementer;
 			}
 			break;
 		case 'w':
-			if (offset.z_offset < CIRCLE_LIMIT)
+			if (origin.z > -CIRCLE_LIMIT)
 			{
-				offset.z_offset += 0.01f;
+				origin.z -= incrementer;
 			}
 			break;
 		case 's':
-			if (offset.z_offset > -CIRCLE_LIMIT)
+			if (origin.z < CIRCLE_LIMIT)
 			{
-				offset.z_offset -= 0.01f;
+				origin.z += incrementer;
+			}
+			break;
+		case 'q':
+			if (origin.y < CIRCLE_LIMIT)
+			{
+				origin.y += incrementer;
+			}
+			break;
+		case 'e':
+			if (origin.y > -CIRCLE_LIMIT)
+			{
+				origin.y -= incrementer;
 			}
 			break;
 		case 'j':
-			if (jitter_on)
-			{
-				jitter_on = false;
-			}
-			else
-			{
-				jitter_on = true;
-			}
-			break;
-		case 'o':
-			limits.lower_limit += 0.01f;
-			break;
-		case 'l':
-			limits.lower_limit -= 0.01f;
+			jitter_on = !jitter_on;
 			break;
     }
 }
