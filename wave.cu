@@ -32,7 +32,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 #include <device_launch_parameters.h>
 #include <random>
 
@@ -67,8 +66,9 @@
 
 #include <vector_types.h>
 #include <array>
-#include <chrono>
 #include <thread>
+#include <iostream>
+#include <fstream>
 
 #define MAX_EPSILON_ERROR 10.0f
 #define THRESHOLD          0.30f
@@ -76,15 +76,20 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 // constants
-const unsigned int window_width  = 512;
-const unsigned int window_height = 512;
+
+// _WIN32 = we're in windows
+#ifdef _WIN32
+// Windows
+static const unsigned int window_width = GetSystemMetrics(SM_CXSCREEN) - 20;
+static const unsigned int window_height = GetSystemMetrics(SM_CYSCREEN) - 40;
+#else
+static const unsigned int window_width = 1280;
+static const unsigned int window_height = 720;
+#endif
 
 const unsigned int mesh_width    = 128;
 const unsigned int mesh_height   = 128;
-float r = 0, g = 0, b = 0;
-//float n1 = (rand() / (RAND_MAX + 1.0));
-//float n2 = (rand() / (RAND_MAX + 1.0));
-
+float r = 0, g = 0, b = 1;
 
 // vbo variables
 GLuint vbo;
@@ -92,6 +97,7 @@ struct cudaGraphicsResource *cuda_vbo_resource;
 void *d_vbo_buffer = NULL;
 float * d_rand_buffer;
 float g_fAnim = 0.0;
+
 
 // mouse controls
 int mouse_old_x, mouse_old_y;
@@ -101,25 +107,34 @@ float translate_z = -3.0;
 
 // Keyboard Inputs
 struct Origin {
-	float x = 0, y=0, z = 0;
+	float x = 0, y = 0, z = 0;
 };
 
+struct WaveProperties
+{
+	const float CIRCLE_RADIUS = 0.25;
+	float freq = 3.0f;
+	float amp = 0.5f;
+	bool dna = false;
+	bool jitter_on = false;
+};
 // Random number upper and lower limits
 struct WaveLimits {
-	float lower_limit = -0.05, upper_limit = 0.05;
+	float lower_limit = -0.05f, upper_limit = 0.05f;
 };
 
 Origin origin;
 WaveLimits limits;
-static const float incrementer = 0.01f;
+WaveProperties wp;
+static const float INCREMENTER = 0.01f;
+int hasRan =0;
+
 // Defining random number buffer size and type.
 static const int RAND_BUFFER_SIZE = (mesh_width * mesh_height * 4);
 std::array <float, RAND_BUFFER_SIZE> rand_buffer;
 std::random_device rd;  //Will be used to obtain a seed for the random number engine
 std::mt19937  gen{ rd() };
 
-
-bool jitter_on = false;
 StopWatchInterface *timer = NULL;
 
 // Auto-Verification Code
@@ -169,8 +184,8 @@ void RandomNoiseGeneration()
 	std::uniform_real_distribution<> rands(limits.lower_limit, limits.upper_limit);
 	for (int i = 0; i < rand_buffer.size(); i++)
 	{
-		rand_buffer[i] = rands(gen);
-		//rand_buffer[i] = ((rand() / (float)RAND_MAX) - 0.5f) * 0.05f;
+		rand_buffer[i] = (float)rands(gen);
+		//rand_buffer[i] = ((rand() / (float)RAND_MAX) - 0.5f) * 0.05f; Different random function if you prefer.
 	}
 }
 
@@ -184,9 +199,9 @@ const char *sSDKsample = "simpleGL (VBO)";
 //! @param time - system time
 //! @param origin - origin point of the circle
 ///////////////////////////////////////////////////////////////////////////////
-__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Origin origin)
+__global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Origin origin , WaveProperties wp)
 {
-	const float CIRCLE_RADIUS = 0.25;
+	
     unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
 
@@ -197,15 +212,16 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
     v = v*2.0f - 1.0f; // Allows the circle to move up and down on the plane.
 
 	// calculate simple sine wave pattern
-	float freq = 3.0f;
-	float w = sinf(u*freq + time) * cosf(v*freq + time) * 0.5f;
-	//DNA Swizzle u = sinf(u*freq + time) *cosf(v* freq + time);
-
+	float w = sinf(u*wp.freq + time) * cosf(v*wp.freq + time) * wp.amp;
+	if(wp.dna)
+	{
+		v = sinf(u*wp.freq + time) *cosf(v* wp.freq + time); //DNA Swizzle
+	}
 
 	float centreX = u - origin.x;
 	float centreY = v - origin.z;
 	// write output vertex
-	if (sqrt(centreX*centreX + centreY*centreY) < CIRCLE_RADIUS) // Perimeter of circle
+	if (sqrt(centreX*centreX + centreY*centreY) < wp.CIRCLE_RADIUS && !wp.dna) // Perimeter of circle
 	{
 		w = 0.0f + origin.y;
 	}
@@ -229,8 +245,8 @@ __global__ void jitter_kernel(float4 *pos, unsigned int width, float *rand_buffe
 	int index = y*width + x;
 	int b_index = index * 4;
 	pos[index].x += rand_buffer[b_index];
-	pos[index].y += rand_buffer[b_index+1];
-	pos[index].z += rand_buffer[b_index+2];
+	pos[index].y += rand_buffer[b_index +1];
+	pos[index].z += rand_buffer[b_index +2];
 }
 
 void launch_kernel(float4 *pos, unsigned int mesh_width,
@@ -240,37 +256,11 @@ void launch_kernel(float4 *pos, unsigned int mesh_width,
     // execute the kernel
     dim3 block(8, 8, 1);
     dim3 grid(mesh_width / block.x, mesh_height / block.y, 1);
-    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, origin);
-	if (jitter_on)
+    simple_vbo_kernel<<< grid, block>>>(pos, mesh_width, mesh_height, time, origin, wp);
+	if (wp.jitter_on)
 	{
 		jitter_kernel << < grid, block >> > (pos, mesh_width, d_rand_buffer);
 	}
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-
-	/* Add "Creative" shit - change animation speed, wave pattern (DNA), 
-	 * RGB - change point colour based on y coord of point.
-	 */
-
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
-	////////////////////////////////////////////
 }
 
 bool checkHW(char *name, const char *gpuType, int dev)
@@ -314,8 +304,29 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("\n");
+	std::ifstream infile("hasran.txt");
+	if (infile.is_open())
+	{
+		infile >> hasRan;
+		std::cout << hasRan;
+	}
+	if (hasRan == 0)
+	{
+		printf("\n");
+		// _WIN32 = we're in windows
+		#ifdef _WIN32
+		// Windows
+		ShellExecute(0, 0, "https://i.imgur.com/RPXNRiy.jpg", 0, 0, SW_SHOW);
+		#else
+		// Not windows
+		system("xdg-open https://i.imgur.com/RPXNRiy.jpg &");
+		#endif
 
+		std::ofstream outfile("hasran.txt");
+		outfile << "1" << std::endl;
+		outfile.close();
+	}
+	
     runTest(argc, argv, ref_file);
 
     printf("%s completed, returned %s\n", sSDKsample, (g_TotalErrors == 0) ? "OK" : "ERROR!");
@@ -578,7 +589,7 @@ void display()
 
     glEnableClientState(GL_VERTEX_ARRAY);
 	
-	glColor3f(n1, n2, 1.0f);
+	glColor3f(r, g, b);
 	// Deafult point size is always 1 so we can use glPointSize here to increase their size
 	glPointSize(2.0f);
 	glEnable(GL_POINT_SMOOTH); // Anti aliases the points down into circles.
@@ -617,47 +628,32 @@ void specialKeyboard(int key, int x, int y)
 	switch (key)
 	{
 	case GLUT_KEY_UP:
-		if (limits.upper_limit < (incrementer * 50))
+		if (limits.upper_limit < (INCREMENTER * 50))
 		{
-			limits.lower_limit -= incrementer;
-			limits.upper_limit += incrementer;
+			limits.lower_limit -= INCREMENTER;
+			limits.upper_limit += INCREMENTER;
 		}
 		break;
 	case GLUT_KEY_DOWN:
-		if (limits.lower_limit < -incrementer)
+		if (limits.lower_limit < -INCREMENTER)
 		{
-			limits.lower_limit += incrementer;
-			limits.upper_limit -= incrementer;
+			limits.lower_limit += INCREMENTER;
+			limits.upper_limit -= INCREMENTER;
 		}
 		else
 		{
-			limits.lower_limit = -incrementer;
-			limits.upper_limit = incrementer;
+			limits.lower_limit = -INCREMENTER;
+			limits.upper_limit = INCREMENTER;
 		}
 		break;
 	case GLUT_KEY_RIGHT:
-		///*if (r >= 1.0)
-		//{
-		//	r -= n3;
-		//}*/
-		//r += n1;
-		///*if (g >= 1.0)
-		//{
-		//	g -= n1;
-		//}*/
-		//g += n2;
-		///*if (b >= 1.0)
-		//{
-		//	b -= n2;
-		//}*/
-		//b += n3;
+		wp.freq += INCREMENTER * 10;
 		break;
 	case GLUT_KEY_LEFT:
-		/*g -= n1;
-		b -= n2;
-		r -= n3;*/
+		wp.freq -= INCREMENTER * 10;
 		break;
 	}
+	
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -665,7 +661,7 @@ void specialKeyboard(int key, int x, int y)
 ////////////////////////////////////////////////////////////////////////////////
 void keyboard(unsigned char key, int /*x*/, int /*y*/)
 {
-	const float CIRCLE_LIMIT = 0.9;
+	const float CIRCLE_LIMIT = 0.9f;
     switch (key)
     {
         case (27) :
@@ -678,41 +674,71 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/)
 		case 'a':
 			if (origin.x > -CIRCLE_LIMIT)
 			{
-				origin.x -= incrementer;
+				origin.x -= INCREMENTER *3;
 			}
 			break;
 		case 'd':
 			if (origin.x < CIRCLE_LIMIT)
 			{
-				origin.x += incrementer;
+				origin.x += INCREMENTER *3;
 			}
 			break;
 		case 'w':
 			if (origin.z > -CIRCLE_LIMIT)
 			{
-				origin.z -= incrementer;
+				origin.z -= INCREMENTER * 3;
 			}
 			break;
 		case 's':
 			if (origin.z < CIRCLE_LIMIT)
 			{
-				origin.z += incrementer;
+				origin.z += INCREMENTER * 3;
 			}
 			break;
 		case 'q':
 			if (origin.y < CIRCLE_LIMIT)
 			{
-				origin.y += incrementer;
+				origin.y += INCREMENTER * 3;
 			}
 			break;
 		case 'e':
 			if (origin.y > -CIRCLE_LIMIT)
 			{
-				origin.y -= incrementer;
+				origin.y -= INCREMENTER * 3;
 			}
 			break;
 		case 'j':
-			jitter_on = !jitter_on;
+			wp.jitter_on = !wp.jitter_on;
+			break;
+		case 'f':
+			wp.dna = !wp.dna;
+			break;
+		case 'r':
+			if (r>=1.0)
+			{
+				r = 0;
+			}
+			r += INCREMENTER * 5;
+			break;
+		case 'g':
+		if(g >=1.0)
+			{
+				g = 0;
+			}
+			g += INCREMENTER * 5;
+			break;
+		case 'b':
+			if (b >= 1.0)
+			{
+				b = 0;
+			}
+			b += INCREMENTER * 5;
+			break;
+		case 'z':
+			wp.amp -= INCREMENTER;
+			break;
+		case 'x':
+			wp.amp += INCREMENTER;
 			break;
     }
 }
