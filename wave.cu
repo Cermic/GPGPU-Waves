@@ -330,6 +330,7 @@ int main(int argc, char **argv)
     runTest(argc, argv, ref_file);
 
     printf("%s completed, returned %s\n", sSDKsample, (g_TotalErrors == 0) ? "OK" : "ERROR!");
+	cudaDeviceReset();
     exit(g_TotalErrors == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -468,8 +469,8 @@ void runCuda(struct cudaGraphicsResource **vbo_resource)
     checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void **)&dptr, &num_bytes,
                                                          *vbo_resource));
 
-	cudaMalloc((void **)&d_rand_buffer, rand_buffer.size() * sizeof(float));
-	cudaMemcpy(d_rand_buffer, rand_buffer.data(), rand_buffer.size() * sizeof(float), cudaMemcpyHostToDevice);
+	checkCudaErrors(cudaMalloc((void **)&d_rand_buffer, rand_buffer.size() * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(d_rand_buffer, rand_buffer.data(), rand_buffer.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     launch_kernel(dptr, mesh_width, mesh_height, g_fAnim);
 
