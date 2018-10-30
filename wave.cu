@@ -198,6 +198,7 @@ const char *sSDKsample = "simpleGL (VBO)";
 //! @param height - mesh height
 //! @param time - system time
 //! @param origin - origin point of the circle
+//! @param wp - various wave attributes
 ///////////////////////////////////////////////////////////////////////////////
 __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int height, float time, Origin origin , WaveProperties wp)
 {
@@ -205,7 +206,7 @@ __global__ void simple_vbo_kernel(float4 *pos, unsigned int width, unsigned int 
     unsigned int x = blockIdx.x*blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y*blockDim.y + threadIdx.y;
 
-    // calculate uv coordinates
+    // calculate uv coordinatescuda
     float u = x / (float) width;
     float v = y / (float) height;
     u = u*2.0f - 1.0f; // Allows the circle to move left and right on the plane.
@@ -331,6 +332,7 @@ int main(int argc, char **argv)
 
     printf("%s completed, returned %s\n", sSDKsample, (g_TotalErrors == 0) ? "OK" : "ERROR!");
 	cudaDeviceReset();
+	cudaFree(d_rand_buffer);
     exit(g_TotalErrors == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
@@ -445,8 +447,11 @@ bool runTest(int argc, char **argv, char *ref_file)
         // create VBO
         createVBO(&vbo, &cuda_vbo_resource, cudaGraphicsMapFlagsWriteDiscard);
 
-        // run the cuda part
-        runCuda(&cuda_vbo_resource);
+        
+		// Allocate memory for the random buffer
+		checkCudaErrors(cudaMalloc((void **)&d_rand_buffer, rand_buffer.size() * sizeof(float)));
+		// run the cuda part
+    	runCuda(&cuda_vbo_resource);
 
         // start rendering mainloop
         glutMainLoop();
@@ -468,8 +473,7 @@ void runCuda(struct cudaGraphicsResource **vbo_resource)
     size_t num_bytes;
     checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void **)&dptr, &num_bytes,
                                                          *vbo_resource));
-
-	checkCudaErrors(cudaMalloc((void **)&d_rand_buffer, rand_buffer.size() * sizeof(float)));
+	// Copy the buffer to the GPU
 	checkCudaErrors(cudaMemcpy(d_rand_buffer, rand_buffer.data(), rand_buffer.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     launch_kernel(dptr, mesh_width, mesh_height, g_fAnim);
